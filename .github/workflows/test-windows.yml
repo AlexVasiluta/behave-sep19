@@ -84,7 +84,8 @@ jobs:
       - name: "Run behave tests: examples ..."
         shell: bash
         run: |
-          uv pip install --system assertpy
+          # -- PINNED: assertpy 2.x breaks examples/soft_asserts ("@soft_assertions()").
+          uv pip install --system "assertpy<2"
           export PYTHONPATH="$PWD"
           for example in examples/*/; do
             [[ "$(basename "$example")" == "env_vars" ]] && continue

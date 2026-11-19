@@ -1,0 +1,96 @@
+# Select the tests a pull request needs with SEP-19 (impact analysis), then run only those.
+#
+# SETUP:
+#   secret   SEP19_DEPLOY_KEY : private half of a read-only deploy key of AlexVasiluta/sep-19
+#   variable SEP19_REF        : optional, the sep-19 branch to analyse with (default: master)
+#   secrets  NEON_*           : optional, store each run for the dashboard
+
+name: Impact analysis
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # -- Runs sep-19 only, never code from the pull request: this job holds the secrets.
+  analyze:
+    # Pull requests from forks get no secrets, so they cannot check out sep-19.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.analysis.outputs.tests }}             # JSON list of test IDs
+      full_suite: ${{ steps.analysis.outputs.full_suite }}   # "false" when the selection can be trusted
+      risk_level: ${{ steps.analysis.outputs.risk_level }}   # low | medium | high | critical
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: AlexVasiluta/sep-19
+          ref: ${{ vars.SEP19_REF || 'master' }}
+          ssh-key: ${{ secrets.SEP19_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+      - id: analysis
+        run: uv run --locked --no-dev sep-19
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEON_HOST: ${{ secrets.NEON_HOST }}
+          NEON_DATABASE: ${{ secrets.NEON_DATABASE }}
+          NEON_USER: ${{ secrets.NEON_USER }}
+          NEON_PASSWORD: ${{ secrets.NEON_PASSWORD }}
+
+  # -- Runs code from the pull request: no secrets here.
+  system-tests:
+    needs: analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: "Install Python package dependencies (with: uv)"
+        run: |
+          uv pip install --system -r py.requirements/ci.github.testing.txt
+          uv pip install --system -e .
+      - name: Run the selected tests
+        shell: python
+        env:
+          TESTS: ${{ needs.analyze.outputs.tests }}
+          FULL_SUITE: ${{ needs.analyze.outputs.full_suite }}
+          RISK: ${{ needs.analyze.outputs.risk_level }}
+        run: |
+          import json
+          import os
+          import subprocess
+          import sys
+          from itertools import groupby
+          from os.path import dirname
+
+          def run(*command):
+              print("+", *command, flush=True)
+              if returncode := subprocess.run(command).returncode:
+                  sys.exit(returncode)
+
+          risk = os.environ["RISK"] or "unknown"
+          if os.environ["FULL_SUITE"] != "false":
+              # -- FAIL SAFE: also when the analysis failed or gave no answer.
+              print(f"Risk {risk}: running the full suite", flush=True)
+              run("pytest")
+              for directory in ("features", "issue.features", "tools/test-features"):
+                  run("behave", "--format=progress3", directory)
+          else:
+              # -- TEST IDS: behave locations (features/x.feature:12) or pytest node IDs.
+              tests = json.loads(os.environ["TESTS"])
+              print(f"Risk {risk}: running {len(tests)} selected tests", flush=True)
+              if not tests:
+                  print("::warning::sep-19 selected no tests for this pull request")
+              pytest_ids = [test for test in tests if ".feature" not in test]
+              locations = sorted((test for test in tests if ".feature" in test), key=dirname)
+              if pytest_ids:
+                  run("pytest", *pytest_ids)
+              # -- ONE behave run per directory: each has its own steps and environment.py
+              for _, group in groupby(locations, key=dirname):
+                  run("behave", "--format=progress3", *group)
