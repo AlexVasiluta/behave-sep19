@@ -3,7 +3,8 @@
 # SETUP:
 #   secret   SEP19_DEPLOY_KEY : private half of a read-only deploy key of AlexVasiluta/sep-19
 #   variable SEP19_REF        : optional, the sep-19 branch to analyse with (default: master)
-#   secrets  NEON_*           : optional, store each run for the dashboard
+#   secrets  POSTGRES_*       : optional, store each run for the dashboard
+#   secret   LLM_API_KEY      : optional, let sep-19 use its LLM
 
 name: Impact analysis
 
@@ -17,7 +18,7 @@ permissions:
 jobs:
   # -- Runs sep-19 only, never code from the pull request: this job holds the secrets.
   analyze:
-    # Pull requests from forks get no secrets, so they cannot check out sep-19.
+    # Pull requests from forks get no secrets, so they cannot check out sep-19: full suite.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
@@ -31,19 +32,35 @@ jobs:
           ref: ${{ vars.SEP19_REF || 'master' }}
           ssh-key: ${{ secrets.SEP19_DEPLOY_KEY }}
           persist-credentials: false
+      # -- This repository with its full history, for the historical-defects risk factor.
+      #    The base commit, not the pull request: sep-19 reads the changes from the GitHub API.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          path: analyzed-repo
+          persist-credentials: false
       - uses: astral-sh/setup-uv@v10.3.3
       - id: analysis
         run: uv run --locked --no-dev sep-19
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NEON_HOST: ${{ secrets.NEON_HOST }}
-          NEON_DATABASE: ${{ secrets.NEON_DATABASE }}
-          NEON_USER: ${{ secrets.NEON_USER }}
-          NEON_PASSWORD: ${{ secrets.NEON_PASSWORD }}
+          SEP19_ANALYZED_REPO: analyzed-repo
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_PORT: ${{ secrets.POSTGRES_PORT }}
+          POSTGRES_DATABASE: ${{ secrets.POSTGRES_DATABASE }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_ENDPOINT: https://api.groq.com/openai/v1
+          LLM_MODEL: openai/gpt-oss-20b
+          LLM_MAX_OUTPUT_TOKENS: "2000"
 
   # -- Runs code from the pull request: no secrets here.
   system-tests:
     needs: analyze
+    # -- FAIL SAFE: also run when the analysis job failed or was skipped, and then run everything.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
